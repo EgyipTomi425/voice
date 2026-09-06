@@ -314,7 +314,18 @@ namespace vc
 
         std::unique_lock lock(session->mtx);
 
-        bool need_connect = shard->get_voice(guild_id) == nullptr;
+        dpp::voiceconn* existing = shard->get_voice(guild_id);
+
+        dpp::snowflake target_channel_id = 0;
+        auto vsi = g->voice_members.find(user_id);
+        if (vsi != g->voice_members.end())
+            target_channel_id = vsi->second.channel_id;
+
+        // Reconnect not just when there's no voice connection yet, but also when
+        // there is one and the requesting user is currently in a *different*
+        // channel - otherwise the bot would keep talking in whatever channel it
+        // joined first instead of following the user who ran the command.
+        bool need_connect = !existing || (target_channel_id != 0 && existing->channel_id != target_channel_id);
 
         if (need_connect)
         {
