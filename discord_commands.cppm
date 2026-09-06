@@ -33,15 +33,22 @@ export void say_cmd(const dpp::slashcommand_t& event)
     if (auto p = std::get_if<std::string>(&lang_param); p && !p->empty())
         lang = *p;
 
-    if (event.command.guild_id == 0)
-    {
-        reply_ephemeral(event, "Ez a parancs csak szerveren mukodik, DM-ben nem.");
-        return;
-    }
-
     auto user_id = event.command.get_issuing_user().id;
 
-    if (!vc::say(event.from(), event.command.guild_id, user_id, text, lang))
+    dpp::snowflake guild_id = event.command.guild_id;
+    if (guild_id == 0)
+    {
+        // Invoked from a DM with the bot: find a shared guild where the caller
+        // is currently in a voice channel, since there's no guild context here.
+        guild_id = vc::find_voice_guild(user_id);
+        if (guild_id == 0)
+        {
+            reply_ephemeral(event, "Nem vagy hangcsatornaban egyik kozos szerverunkon sem!");
+            return;
+        }
+    }
+
+    if (!vc::say(event.from(), guild_id, user_id, text, lang))
     {
         reply_ephemeral(event, "Nem vagy hangcsatornaban ezen a szerveren!");
         return;

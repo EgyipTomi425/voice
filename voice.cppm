@@ -28,4 +28,10 @@ export namespace vc
         const std::string& text,
         const std::string& lang = "hu"
     );
+
+    // Searches every guild the bot shares with `user_id` for one where they're
+    // currently sitting in a voice channel. Lets /vc say work from a DM with the
+    // bot, without the caller having to go find a text channel on that server.
+    // Returns 0 if `user_id` isn't in a voice channel on any shared guild.
+    dpp::snowflake find_voice_guild(dpp::snowflake user_id);
 }

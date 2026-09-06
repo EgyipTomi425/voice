@@ -8,6 +8,7 @@ module;
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -336,5 +337,18 @@ namespace vc
         }).detach();
 
         return true;
+    }
+
+    dpp::snowflake find_voice_guild(dpp::snowflake user_id)
+    {
+        dpp::cache<dpp::guild>* c = dpp::get_guild_cache();
+        auto& container = c->get_container();
+        std::shared_lock lock(c->get_mutex());
+
+        for (auto& [id, g] : container)
+            if (g->voice_members.find(user_id) != g->voice_members.end())
+                return id;
+
+        return 0;
     }
 }
