@@ -1,0 +1,282 @@
+module;
+
+#include <dpp/dpp.h>
+#include <array>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include <unistd.h>
+#include <sys/wait.h>
+
+module voice;
+
+import echterwachter;
+
+namespace
+{
+    struct queued_line
+    {
+        std::string text;
+        std::string lang;
+        dpp::snowflake user_id;
+    };
+
+    struct guild_voice_session
+    {
+        std::mutex mtx;
+        std::condition_variable cv;
+        std::deque<queued_line> queue;
+        bool worker_running = false;
+        bool ready = false;
+    };
+
+    std::mutex sessions_mutex;
+    std::unordered_map<dpp::snowflake, std::shared_ptr<guild_voice_session>> sessions;
+
+    std::shared_ptr<guild_voice_session> get_or_create_session(dpp::snowflake guild_id)
+    {
+        std::lock_guard lock(sessions_mutex);
+        auto& s = sessions[guild_id];
+        if (!s)
+            s = std::make_shared<guild_voice_session>();
+        return s;
+    }
+
+    std::shared_ptr<guild_voice_session> find_session(dpp::snowflake guild_id)
+    {
+        std::lock_guard lock(sessions_mutex);
+        auto it = sessions.find(guild_id);
+        return it != sessions.end() ? it->second : nullptr;
+    }
+
+    // Runs `argv` directly via fork+execvp (no shell involved anywhere), feeds it
+    // `input` on stdin, and returns everything it wrote to stdout. Returns an empty
+    // vector if the process could not be started or exited with a non-zero status.
+    // Because there is no shell in the loop, user-supplied text in `argv` can never
+    // be interpreted as shell syntax (no command injection risk).
+    std::vector<uint8_t> run_process(const std::vector<std::string>& argv, const std::vector<uint8_t>& input)
+    {
+        int in_pipe[2];
+        int out_pipe[2];
+        if (pipe(in_pipe) != 0)
+            return {};
+        if (pipe(out_pipe) != 0)
+        {
+            close(in_pipe[0]);
+            close(in_pipe[1]);
+            return {};
+        }
+
+        pid_t pid = fork();
+        if (pid < 0)
+        {
+            close(in_pipe[0]); close(in_pipe[1]);
+            close(out_pipe[0]); close(out_pipe[1]);
+            return {};
+        }
+
+        if (pid == 0)
+        {
+            dup2(in_pipe[0], STDIN_FILENO);
+            dup2(out_pipe[1], STDOUT_FILENO);
+            close(in_pipe[0]); close(in_pipe[1]);
+            close(out_pipe[0]); close(out_pipe[1]);
+
+            std::vector<char*> c_argv;
+            c_argv.reserve(argv.size() + 1);
+            for (auto& s : argv)
+                c_argv.push_back(const_cast<char*>(s.c_str()));
+            c_argv.push_back(nullptr);
+
+            execvp(c_argv[0], c_argv.data());
+            _exit(127);
+        }
+
+        close(in_pipe[0]);
+        close(out_pipe[1]);
+
+        std::jthread writer([&]
+        {
+            size_t written = 0;
+            while (written < input.size())
+            {
+                ssize_t n = write(in_pipe[1], input.data() + written, input.size() - written);
+                if (n <= 0)
+                    break;
+                written += static_cast<size_t>(n);
+            }
+            close(in_pipe[1]);
+        });
+
+        std::vector<uint8_t> output;
+        std::array<uint8_t, 4096> buf{};
+        ssize_t n;
+        while ((n = read(out_pipe[0], buf.data(), buf.size())) > 0)
+            output.insert(output.end(), buf.begin(), buf.begin() + n);
+        close(out_pipe[0]);
+
+        writer.join();
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+        if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0))
+            return {};
+
+        return output;
+    }
+
+    // Synthesizes `text` (spoken with the espeak-ng voice `lang`, e.g. "hu"/"en") to
+    // raw PCM: signed 16-bit little-endian, 48000 Hz, stereo (exactly what
+    // dpp::discord_voice_client::send_audio_raw expects).
+    //
+    // ffmpeg alone cannot do text-to-speech, so this chains two processes: espeak-ng
+    // synthesizes the speech (as a WAV on stdout), then ffmpeg resamples/reformats
+    // that WAV into the PCM layout Discord needs. `text`/`lang` are passed as single
+    // argv elements to espeak-ng (never through a shell), so they cannot break out
+    // into shell syntax; the leading "--" also stops espeak-ng from treating a
+    // message that starts with "-" as an option.
+    std::vector<uint8_t> text_to_pcm(const std::string& text, const std::string& lang)
+    {
+        auto wav = run_process({"espeak-ng", "-v", lang, "--stdout", "--", text}, {});
+        if (wav.empty())
+            return {};
+
+        return run_process
+        (
+            {
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-i", "pipe:0",
+                "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"
+            },
+            wav
+        );
+    }
+
+    // Failures are DMed to the requesting user rather than posted in the guild
+    // channel, so - like the slash command reply itself - only that user sees them.
+    void notify_user(dpp::snowflake user_id, const std::string& text)
+    {
+        bot.direct_message_create(user_id, dpp::message(text));
+    }
+
+    void worker_loop
+    (
+        std::shared_ptr<guild_voice_session> session,
+        dpp::discord_client* shard,
+        dpp::snowflake guild_id
+    )
+    {
+        while (true)
+        {
+            queued_line line;
+            {
+                std::unique_lock lock(session->mtx);
+                if (session->queue.empty())
+                {
+                    session->worker_running = false;
+                    return;
+                }
+                line = std::move(session->queue.front());
+                session->queue.pop_front();
+            }
+
+            {
+                std::unique_lock lock(session->mtx);
+                bool became_ready = session->cv.wait_for(lock, std::chrono::seconds(15), [&] { return session->ready; });
+                if (!became_ready)
+                {
+                    notify_user(line.user_id, "Nem sikerult csatlakozni a hangcsatornahoz (idotullepes).");
+                    continue;
+                }
+            }
+
+            auto pcm = text_to_pcm(line.text, line.lang);
+            if (pcm.empty())
+            {
+                notify_user(line.user_id, "A felolvasas nem sikerult. Telepitve van az espeak-ng es az ffmpeg, es ismert a megadott nyelv?");
+                continue;
+            }
+
+            dpp::voiceconn* v = shard->get_voice(guild_id);
+            if (!v || !v->voiceclient || !v->voiceclient->is_ready())
+            {
+                notify_user(line.user_id, "A hangkapcsolat idokozben megszunt.");
+                continue;
+            }
+
+            v->voiceclient->send_audio_raw(reinterpret_cast<uint16_t*>(pcm.data()), pcm.size());
+        }
+    }
+
+    void ensure_voice_ready_hook_registered()
+    {
+        static std::once_flag once;
+        std::call_once(once, []
+        {
+            bot.on_voice_ready([](const dpp::voice_ready_t& event)
+            {
+                auto session = find_session(event.voice_client->server_id);
+                if (!session)
+                    return;
+
+                std::lock_guard lock(session->mtx);
+                session->ready = true;
+                session->cv.notify_all();
+            });
+        });
+    }
+}
+
+namespace vc
+{
+    bool say
+    (
+        dpp::discord_client* shard,
+        dpp::snowflake guild_id,
+        dpp::snowflake user_id,
+        const std::string& text,
+        const std::string& lang
+    )
+    {
+        ensure_voice_ready_hook_registered();
+
+        dpp::guild* g = dpp::find_guild(guild_id);
+        if (!g)
+            return false;
+
+        auto session = get_or_create_session(guild_id);
+
+        std::unique_lock lock(session->mtx);
+
+        bool need_connect = shard->get_voice(guild_id) == nullptr;
+
+        if (need_connect)
+        {
+            if (!g->connect_member_voice(bot, user_id))
+                return false;
+            session->ready = false;
+        }
+
+        session->queue.push_back(queued_line{text, lang, user_id});
+
+        if (session->worker_running)
+            return true;
+
+        session->worker_running = true;
+        lock.unlock();
+
+        std::jthread([session, shard, guild_id]
+        {
+            worker_loop(session, shard, guild_id);
+        }).detach();
+
+        return true;
+    }
+}
