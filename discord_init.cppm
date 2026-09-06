@@ -18,6 +18,7 @@ export inline const int init_voice = []
     // Allow /vc say both in a server and in a DM with the bot (DM callers get
     // routed to whichever shared guild they're currently in voice on).
     vc_commands.cmd.set_interaction_contexts({dpp::itc_guild, dpp::itc_bot_dm});
+    vc_commands.cmd.set_dm_permission(true);
 
     vc_commands.add
     (
