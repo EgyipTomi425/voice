@@ -4,12 +4,14 @@ module;
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -61,7 +63,14 @@ namespace
     // vector if the process could not be started or exited with a non-zero status.
     // Because there is no shell in the loop, user-supplied text in `argv` can never
     // be interpreted as shell syntax (no command injection risk).
-    std::vector<uint8_t> run_process(const std::vector<std::string>& argv, const std::vector<uint8_t>& input)
+    // `env_overrides` are set in the child only (e.g. piper needs LD_LIBRARY_PATH
+    // pointed at its own directory for its bundled .so's).
+    std::vector<uint8_t> run_process
+    (
+        const std::vector<std::string>& argv,
+        const std::vector<uint8_t>& input,
+        const std::vector<std::pair<std::string, std::string>>& env_overrides = {}
+    )
     {
         int in_pipe[2];
         int out_pipe[2];
@@ -88,6 +97,9 @@ namespace
             dup2(out_pipe[1], STDOUT_FILENO);
             close(in_pipe[0]); close(in_pipe[1]);
             close(out_pipe[0]); close(out_pipe[1]);
+
+            for (auto& [key, value] : env_overrides)
+                setenv(key.c_str(), value.c_str(), 1);
 
             std::vector<char*> c_argv;
             c_argv.reserve(argv.size() + 1);
@@ -132,19 +144,65 @@ namespace
         return output;
     }
 
-    // Synthesizes `text` (spoken with the espeak-ng voice `lang`, e.g. "hu"/"en") to
-    // raw PCM: signed 16-bit little-endian, 48000 Hz, stereo (exactly what
-    // dpp::discord_voice_client::send_audio_raw expects).
-    //
-    // ffmpeg alone cannot do text-to-speech, so this chains two processes: espeak-ng
-    // synthesizes the speech (as a WAV on stdout), then ffmpeg resamples/reformats
-    // that WAV into the PCM layout Discord needs. `text`/`lang` are passed as single
-    // argv elements to espeak-ng (never through a shell), so they cannot break out
-    // into shell syntax; the leading "--" also stops espeak-ng from treating a
-    // message that starts with "-" as an option.
+    // Piper is a small neural (VITS) TTS engine - it sounds much more natural than
+    // the formant-synthesis espeak-ng voices, and still runs entirely locally/
+    // offline (fine on a Raspberry Pi). Install: https://github.com/rhasspy/piper
+    // PIPER_DIR (CMAKE_CURRENT_SOURCE_DIR/CMakeLists.txt: "$ENV{HOME}/.local/share/piper")
+    // is where the `piper` binary is expected to already be installed; CMake fetches
+    // missing voice models there automatically - see that CMakeLists.txt to add more
+    // languages once a model's .onnx/.onnx.json pair has a download rule.
+    constexpr const char* piper_dir = PIPER_DIR;
+    const std::string piper_bin = std::string(piper_dir) + "/piper";
+
+    std::string piper_model_for_lang(const std::string& lang)
+    {
+        static const std::unordered_map<std::string, std::string> models
+        {
+            {"hu", std::string(piper_dir) + "/voices/hu_HU-anna-medium.onnx"},
+        };
+        auto it = models.find(lang);
+        return it != models.end() ? it->second : std::string{};
+    }
+
+    // Synthesizes `text` as a WAV with Piper's neural voice for `lang`. Text is fed
+    // on stdin (never through a shell, never as an argv element), so it can't be
+    // interpreted as anything but speech. Returns {} if no Piper model is installed
+    // for `lang`, or if synthesis failed.
+    std::vector<uint8_t> synthesize_with_piper(const std::string& text, const std::string& lang)
+    {
+        auto model = piper_model_for_lang(lang);
+        if (model.empty())
+            return {};
+
+        std::vector<uint8_t> input(text.begin(), text.end());
+        return run_process
+        (
+            {piper_bin, "--model", model, "--output_file", "-"},
+            input,
+            {{"LD_LIBRARY_PATH", piper_dir}}
+        );
+    }
+
+    // Fallback for languages with no installed Piper model: espeak-ng's formant
+    // synthesis is far more robotic, but it covers dozens of languages out of the
+    // box. `text`/`lang` are passed as single argv elements (never through a shell),
+    // so they cannot break out into shell syntax; the leading "--" also stops
+    // espeak-ng from treating a message that starts with "-" as an option.
+    std::vector<uint8_t> synthesize_with_espeak(const std::string& text, const std::string& lang)
+    {
+        return run_process({"espeak-ng", "-v", lang, "--stdout", "--", text}, {});
+    }
+
+    // Synthesizes `text` (in voice/language `lang`, e.g. "hu"/"en") to raw PCM:
+    // signed 16-bit little-endian, 48000 Hz, stereo (exactly what
+    // dpp::discord_voice_client::send_audio_raw expects). ffmpeg itself cannot do
+    // text-to-speech - it's only used here to resample/reformat whichever engine's
+    // WAV output into the PCM layout Discord needs.
     std::vector<uint8_t> text_to_pcm(const std::string& text, const std::string& lang)
     {
-        auto wav = run_process({"espeak-ng", "-v", lang, "--stdout", "--", text}, {});
+        auto wav = synthesize_with_piper(text, lang);
+        if (wav.empty())
+            wav = synthesize_with_espeak(text, lang);
         if (wav.empty())
             return {};
 
