@@ -160,6 +160,7 @@ namespace
         static const std::unordered_map<std::string, std::string> models
         {
             {"hu", std::string(piper_dir) + "/voices/hu_HU-anna-medium.onnx"},
+            {"en", std::string(piper_dir) + "/voices/en_US-amy-medium.onnx"},
         };
         auto it = models.find(lang);
         return it != models.end() ? it->second : std::string{};
