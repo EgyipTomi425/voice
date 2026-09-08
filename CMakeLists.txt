@@ -7,6 +7,7 @@ target_sources(voice
         PUBLIC
         FILE_SET CXX_MODULES FILES
             voice.cppm
+            taunts/taunts.cppm
         PRIVATE
             voice.cpp
 )
@@ -19,6 +20,8 @@ if(DISCORD)
             FILE_SET CXX_MODULES FILES
                 discord_commands.cppm
                 discord_init.cppm
+                taunts/discord_commands.cppm
+                taunts/discord_init.cppm
     )
 endif()
 
