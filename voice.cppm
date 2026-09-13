@@ -29,18 +29,6 @@ export namespace vc
         const std::string& lang = "hu"
     );
 
-    // Joins the voice channel that `user_id` is currently sitting in on
-    // `guild_id` (unless the bot is already connected there), without
-    // queuing anything to say - same connect semantics as `say`, minus
-    // the TTS part. Returns false if `user_id` is not currently in any
-    // voice channel on `guild_id`.
-    bool join
-    (
-        dpp::discord_client* shard,
-        dpp::snowflake guild_id,
-        dpp::snowflake user_id
-    );
-
     // Searches every guild the bot shares with `user_id` for one where they're
     // currently sitting in a voice channel. Lets /vc say work from a DM with the
     // bot, without the caller having to go find a text channel on that server.
