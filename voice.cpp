@@ -296,6 +296,42 @@ namespace
 
 namespace vc
 {
+    bool join
+    (
+        dpp::discord_client* shard,
+        dpp::snowflake guild_id,
+        dpp::snowflake user_id
+    )
+    {
+        ensure_voice_ready_hook_registered();
+
+        dpp::guild* g = dpp::find_guild(guild_id);
+        if (!g)
+            return false;
+
+        auto session = get_or_create_session(guild_id);
+
+        std::unique_lock lock(session->mtx);
+
+        dpp::snowflake target_channel_id = 0;
+        auto vsi = g->voice_members.find(user_id);
+        if (vsi != g->voice_members.end())
+            target_channel_id = vsi->second.channel_id;
+
+        if (target_channel_id == 0)
+            return false;
+
+        dpp::voiceconn* existing = shard->get_voice(guild_id);
+        if (existing && existing->channel_id == target_channel_id)
+            return true;
+
+        if (!g->connect_member_voice(bot, user_id))
+            return false;
+
+        session->ready = false;
+        return true;
+    }
+
     bool say
     (
         dpp::discord_client* shard,

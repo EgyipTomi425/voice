@@ -32,5 +32,13 @@ export inline const int init_voice = []
 
     vc_commands.register_commands();
 
+    // Same scope as /vc: usable in a server or in a DM with the bot (DM
+    // callers get routed to whichever shared guild they're currently in
+    // voice on), and the reply is ephemeral so only the caller sees it.
+    dpp::slashcommand join_command("join", "Csatlakozik a hangcsatornadhoz", bot.me.id);
+    join_command.set_interaction_contexts({dpp::itc_guild, dpp::itc_bot_dm});
+    join_command.set_dm_permission(true);
+    add_command(BotCommand(join_command, std::nullopt, join_cmd));
+
     return 42;
 }();

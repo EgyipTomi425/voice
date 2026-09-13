@@ -16,6 +16,32 @@ namespace
     }
 }
 
+export void join_cmd(const dpp::slashcommand_t& event)
+{
+    auto user_id = event.command.get_issuing_user().id;
+
+    dpp::snowflake guild_id = event.command.guild_id;
+    if (guild_id == 0)
+    {
+        // Invoked from a DM with the bot: find a shared guild where the caller
+        // is currently in a voice channel, since there's no guild context here.
+        guild_id = vc::find_voice_guild(user_id);
+        if (guild_id == 0)
+        {
+            reply_ephemeral(event, "Nem vagy hangcsatornaban egyik kozos szerverunkon sem!");
+            return;
+        }
+    }
+
+    if (!vc::join(event.from(), guild_id, user_id))
+    {
+        reply_ephemeral(event, "Nem vagy hangcsatornaban ezen a szerveren!");
+        return;
+    }
+
+    reply_ephemeral(event, "Csatlakoztam a hangcsatornadhoz!");
+}
+
 export void say_cmd(const dpp::slashcommand_t& event)
 {
     std::string text;
