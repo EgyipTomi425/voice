@@ -249,6 +249,21 @@ namespace
 
             {
                 std::unique_lock lock(session->mtx);
+
+                // The connection may already be ready without us ever having
+                // seen its voice_ready event - e.g. /join connected the bot
+                // directly through dpp before this module's on_voice_ready
+                // hook was even registered (that only happens lazily, on the
+                // first /vc say or /t). Trust dpp's own live state over our
+                // bookkeeping so we don't wait on a flag that will never
+                // flip for a connection that's already up.
+                if (!session->ready)
+                {
+                    dpp::voiceconn* v = shard->get_voice(guild_id);
+                    if (v && v->voiceclient && v->voiceclient->is_ready())
+                        session->ready = true;
+                }
+
                 bool became_ready = session->cv.wait_for(lock, std::chrono::seconds(15), [&] { return session->ready; });
                 if (!became_ready)
                 {
